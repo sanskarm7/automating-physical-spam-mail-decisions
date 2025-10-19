@@ -1,0 +1,36 @@
+{
+  "name": "mailops-next-sqlite",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --ext .ts,.tsx --fix || true",
+    "drizzle:generate": "drizzle-kit generate",
+    "drizzle:migrate": "drizzle-kit migrate",
+    "ingest:once": "tsx src/scripts/ingest-once.ts"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "next-auth": "5.0.0-beta.20",
+    "zod": "3.23.8",
+    "googleapis": "131.0.0",
+    "drizzle-orm": "0.33.0",
+    "better-sqlite3": "^11.0.0",
+    "node-cron": "3.0.3",
+    "cheerio": "1.0.0-rc.12"
+  },
+  "devDependencies": {
+    "@types/node": "22.7.5",
+    "@types/react": "18.3.5",
+    "@types/react-dom": "18.3.0",
+    "drizzle-kit": "0.26.2",
+    "eslint": "9.12.0",
+    "eslint-config-next": "14.2.5",
+    "tsx": "4.19.1",
+    "typescript": "5.6.2"
+  }
+}
