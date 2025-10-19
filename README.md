@@ -1,5 +1,5 @@
 
-# MailWolf
+# mailwolf
 
 i get a lot of spam mail from not only people that used to live at my house, but from marketers that 
 have gotten my address overtime.
