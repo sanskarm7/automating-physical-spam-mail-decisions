@@ -11,7 +11,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
       authorization: { 
         params: { 
-          scope: "openid email profile https://www.googleapis.com/auth/gmail.readonly" 
+          scope: "openid email profile https://www.googleapis.com/auth/gmail.readonly",
+          access_type: "offline",
+          prompt: "consent"
         } 
       }
     })
@@ -26,9 +28,17 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
       return true;
     },
+    async jwt({ token, account }) {
+      // Persist the OAuth access_token to the token right after signin
+      if (account) {
+        token.access_token = account.access_token;
+      }
+      return token;
+    },
     async session({ session, token }) {
       if (session.user && token.sub) {
         (session as any).userId = token.sub;
+        (session as any).access_token = token.access_token;
       }
       return session;
     }
