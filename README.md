@@ -11,7 +11,7 @@ notifications.
 
 after this, images will be scanned using OCR and the sender's details will be recorded.
 
-then i will reference the sender's "opt-out" form / customer solutions email saved in my MySQL db.
+then i will reference the sender's "opt-out" form / customer solutions email saved in my SQLite3 db.
 
 using an LLM, the form will be filled and/or an email will be sent.
 
