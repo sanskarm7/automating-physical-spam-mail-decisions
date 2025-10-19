@@ -2,6 +2,7 @@
 'use client';
 
 import { useEffect, useState } from "react";
+import { useSession, signIn, signOut } from "next-auth/react";
 
 type Item = {
   id: number;
@@ -11,6 +12,7 @@ type Item = {
 };
 
 export default function Home() {
+  const { data: session, status } = useSession();
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -23,15 +25,55 @@ export default function Home() {
 
   async function loadQueue() {
     const res = await fetch('/api/queue');
-    const data = await res.json();
-    setItems(data.items || []);
+    if (res.ok) {
+      const data = await res.json();
+      setItems(data.items || []);
+    }
   }
 
-  useEffect(() => { loadQueue(); }, []);
+  useEffect(() => { 
+    if (session) {
+      loadQueue();
+    }
+  }, [session]);
+
+  if (status === "loading") {
+    return (
+      <main className="p-6 max-w-3xl mx-auto">
+        <div>Loading...</div>
+      </main>
+    );
+  }
+
+  if (!session) {
+    return (
+      <main className="p-6 max-w-3xl mx-auto">
+        <h1 className="text-2xl font-bold mb-4">MailOps MVP</h1>
+        <p className="mb-4">You need to sign in to access this application.</p>
+        <button 
+          onClick={() => signIn('google')} 
+          className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
+        >
+          Sign in with Google
+        </button>
+      </main>
+    );
+  }
 
   return (
     <main className="p-6 max-w-3xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">MailOps MVP</h1>
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-2xl font-bold">MailOps MVP</h1>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-gray-600">{session.user?.email}</span>
+          <button 
+            onClick={() => signOut()} 
+            className="px-3 py-1 rounded border text-sm hover:bg-gray-100"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
       <div className="flex gap-2 mb-6">
         <button onClick={ingest} className="px-3 py-2 rounded bg-black text-white" disabled={loading}>
           {loading ? 'Ingesting...' : 'Fetch USPS Digests'}

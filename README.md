@@ -1,18 +1,19 @@
 
-# MailOps MVP (Next.js 14 + SQLite + Drizzle)
+# MailWolf
 
-## Setup
-1. `pnpm i`
-2. Copy `.env.example` to `.env.local` and fill Google credentials and NEXTAUTH_SECRET.
-3. Create `data/` folder: `mkdir -p data`
-4. Run migrations:
-   ```bash
-   pnpm drizzle:generate
-   pnpm drizzle:migrate
-   ```
-5. `pnpm dev` and open http://localhost:3000
+i get a lot of spam mail from not only people that used to live at my house, but from marketers that 
+have gotten my address overtime.
 
-## Notes
-- The ingest endpoint reads USPS Informed Delivery digests using the Gmail API and stores parsed tiles.
-- Parsing is heuristic. Improve `src/lib/parser.ts` as you collect real samples.
-- Add the Sender Directory, action routing, and opt-out automation next.
+this project is an effort to scan my email for USPS inbound spam utilizing "USPS Informed Delivery".
+
+there is no customer facing API so i'm forced to take the unconventional approach of scraping my email for 
+notifications.
+
+after this, images will be scanned using OCR and the sender's details will be recorded.
+
+then i will reference the sender's "opt-out" form / customer solutions email saved in my MySQL db.
+
+using an LLM, the form will be filled and/or an email will be sent.
+
+in the end all you have to do is mark the physical mail as "return to sender" and the idea is that
+the company is aware that you want them to stop.
