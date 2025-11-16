@@ -1,4 +1,3 @@
-
 import * as cheerio from "cheerio";
 
 export type MailPiece = {
@@ -7,7 +6,7 @@ export type MailPiece = {
   deliveryDate: string | null;
 };
 
-// Images to ignore (logos, icons, social media, etc.)
+// Things we never want to treat as mailpieces (logos, social icons, etc.)
 const IGNORED_IMAGE_PATTERNS = [
   /logo/i,
   /icon/i,
@@ -29,243 +28,293 @@ const IGNORED_IMAGE_PATTERNS = [
 ];
 
 export function parseInformedDeliveryTiles(html: string): MailPiece[] {
-  const $ = cheerio.load(html);
+  const $: cheerio.CheerioAPI = cheerio.load(html);
   const pieces: MailPiece[] = [];
 
-  // Extract the main digest date from the subject/header
   const mainDate = extractMainDate($);
 
-  // Find mail piece images - USPS typically structures these in tables or divs
-  // Look for images that are likely mail pieces (not logos/icons)
   $("img").each((_, el) => {
-    const img = $(el);
+    const img: cheerio.Cheerio<cheerio.AnyNode> = $(el);
     const src = img.attr("src");
     if (!src) return;
 
-    // Skip ignored images (logos, icons, etc.)
-    const alt = (img.attr("alt") || "").toLowerCase();
-    const isIgnored = IGNORED_IMAGE_PATTERNS.some(pattern => 
-      pattern.test(src) || pattern.test(alt)
-    );
-    if (isIgnored) return;
+    // USPS uses cid: URLs for actual letter scans and campaign tiles
+    if (!src.toLowerCase().startsWith("cid:")) return;
 
-    // Skip very small images (likely icons)
-    const width = parseInt(img.attr("width") || "0");
-    const height = parseInt(img.attr("height") || "0");
-    if (width > 0 && width < 50) return;
-    if (height > 0 && height < 50) return;
+    if (isIgnoredImage(img)) return;
+    if (isTooSmall(img)) return;
 
-    // Find the parent container that likely contains sender info
-    // USPS emails typically structure mail pieces in table cells or divs
-    let container = img.closest("td, div, table").first();
-    if (container.length === 0) return;
+    const container: cheerio.Cheerio<cheerio.AnyNode> =
+      img.closest("td, div, table").first();
+    if (!container.length) return;
 
-    let sender: string | null = null;
-    
-    // Strategy 1: USPS uses <span id="campaign-from-span-id"> to contain sender names
-    // Find the parent table that contains this image, then look for the span
-    const parentTable = img.closest("table");
-    if (parentTable.length > 0) {
-      const senderSpan = parentTable.find('span[id="campaign-from-span-id"]');
-      if (senderSpan.length > 0) {
-        const senderText = senderSpan.text().trim();
-        if (senderText && senderText.length > 0) {
-          sender = cleanText(senderText);
-        }
-      }
-    }
-    
-    // Strategy 2: Look for "FROM:" in the same table but different row
-    if (!sender) {
-      const table = img.closest("table");
-      if (table.length > 0) {
-        // Find all table rows in this table
-        const rows = table.find("tr");
-        for (let i = 0; i < rows.length && !sender; i++) {
-          const rowText = $(rows[i]).text().replace(/\s+/g, " ").trim();
-          sender = extractSender(rowText);
-        }
-      }
-    }
-    
-    // Strategy 3: Check the containing table row (if in a table)
-    if (!sender) {
-      const row = img.closest("tr");
-      if (row.length > 0) {
-        const rowText = row.text().replace(/\s+/g, " ").trim();
-        sender = extractSender(rowText);
-      }
-    }
-    
-    // Strategy 4: Check parent elements (table, div) within a few levels up
-    if (!sender) {
-      let current = container;
-      for (let i = 0; i < 5 && current.length > 0 && !sender; i++) {
-        const text = current.text().replace(/\s+/g, " ").trim();
-        sender = extractSender(text);
-        current = current.parent();
-      }
-    }
-    
-    // Strategy 5: Check siblings - sometimes sender info is in adjacent cells
-    if (!sender) {
-      const siblings = container.siblings();
-      for (let i = 0; i < siblings.length && !sender; i++) {
-        const text = siblings.eq(i).text().replace(/\s+/g, " ").trim();
-        sender = extractSender(text);
-      }
-    }
-    
-    // Strategy 6: Check previous siblings - USPS puts FROM: before the image row
-    if (!sender) {
-      const prevSiblings = container.parent().prevAll().find('span[id="campaign-from-span-id"]');
-      if (prevSiblings.length > 0) {
-        const senderText = prevSiblings.first().text().trim();
-        if (senderText && senderText.length > 0) {
-          sender = cleanText(senderText);
-        }
-      }
-    }
+    const sender = getSenderForImage($, img, container);
+    const deliveryDate = extractDeliveryDate($, img, mainDate);
 
-    // Determine delivery date - check if image is in "Expected Today" or "Expected This Week" section
-    const deliveryDate = extractDeliveryDate($, container, mainDate);
-
-    // If still no sender, try to extract from container text but filter out junk
-    const containerText = container.text().replace(/\s+/g, " ").trim();
-    let fallbackSender = sender;
-    if (!fallbackSender && containerText) {
-      // Only use fallback if it looks like a real sender name
-      const cleaned = cleanText(containerText.slice(0, 120));
-      if (cleaned && cleaned.length > 2 && 
-          !/Learn more|mail|package|dashboard|view|expected|today|week|icon|click/i.test(cleaned) &&
-          /^[A-Z]/.test(cleaned)) {
-        fallbackSender = cleaned;
-      }
-    }
+    const containerText = normalizeWhitespace(container.text());
+    const fallbackSender =
+      sender || deriveFallbackSenderFromText(containerText);
 
     pieces.push({
-      senderGuess: sender || fallbackSender || null,
+      senderGuess: fallbackSender,
       imageUrl: src,
-      deliveryDate: deliveryDate || mainDate
+      deliveryDate: deliveryDate || mainDate,
     });
   });
 
-  // Deduplicate by imageUrl
+  // Remove duplicates by their cid URL
   const uniq = new Map<string, MailPiece>();
   for (const p of pieces) {
     if (!p.imageUrl) continue;
     if (!uniq.has(p.imageUrl)) uniq.set(p.imageUrl, p);
   }
-  
+
   return Array.from(uniq.values());
 }
 
-function extractMainDate($: cheerio.CheerioAPI): string | null {
-  const bodyText = $("body").text();
-  
-  // Try "Your Daily Digest for Sat, 11/15" or "Sat, 11/15"
-  let m = bodyText.match(/Daily Digest for\s+([A-Z][a-z]{2}),\s+(\d{1,2})\/(\d{1,2})/i);
-  if (m) {
-    const month = parseInt(m[2]);
-    const day = parseInt(m[3]);
-    const currentYear = new Date().getFullYear();
-    return `${currentYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+/* -------------------------- image filtering -------------------------- */
+
+function isIgnoredImage(
+  img: cheerio.Cheerio<cheerio.AnyNode>
+): boolean {
+  const src = img.attr("src") || "";
+  const alt = (img.attr("alt") || "").toLowerCase();
+
+  return IGNORED_IMAGE_PATTERNS.some((pattern) => {
+    return pattern.test(src) || pattern.test(alt);
+  });
+}
+
+// Ignore tiny icons (tracking dots, dividers, etc.)
+function isTooSmall(
+  img: cheerio.Cheerio<cheerio.AnyNode>
+): boolean {
+  const width = parseInt(img.attr("width") || "0", 10);
+  const height = parseInt(img.attr("height") || "0", 10);
+  return (width > 0 && width < 50) || (height > 0 && height < 50);
+}
+
+/* -------------------------- sender extraction -------------------------- */
+
+function getSenderForImage(
+  $: cheerio.CheerioAPI,
+  img: cheerio.Cheerio<cheerio.AnyNode>,
+  container: cheerio.Cheerio<cheerio.AnyNode>
+): string | null {
+  // First check if USPS put the official campaign sender here
+  const campaignSender = getSenderFromCampaignSpan($, img);
+  if (campaignSender) return campaignSender;
+
+  // Try the table the image lives in
+  const table = img.closest("table");
+  if (table.length) {
+    for (const row of table.find("tr").toArray()) {
+      const rowText = normalizeWhitespace($(row).text());
+      const sender = extractSender(rowText);
+      if (sender) return sender;
+    }
   }
-  
-  // Try full date format: "Saturday, 15 November 2025"
-  m = bodyText.match(/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(\d{1,2})\s+([A-Z][a-z]+)\s+(\d{4})/i);
-  if (m) {
-    const monthNames: Record<string, string> = {
-      january: "01", february: "02", march: "03", april: "04",
-      may: "05", june: "06", july: "07", august: "08",
-      september: "09", october: "10", november: "11", december: "12"
-    };
-    const month = monthNames[m[3].toLowerCase()];
-    const day = m[2].padStart(2, '0');
-    return `${m[4]}-${month}-${day}`;
+
+  // Try its row
+  const row = img.closest("tr");
+  if (row.length) {
+    const rowText = normalizeWhitespace(row.text());
+    const sender = extractSender(rowText);
+    if (sender) return sender;
   }
-  
-  // Try "Saturday 15 November 2025"
-  m = bodyText.match(/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+(\d{1,2})\s+([A-Z][a-z]+)\s+(\d{4})/i);
-  if (m) {
-    const monthNames: Record<string, string> = {
-      january: "01", february: "02", march: "03", april: "04",
-      may: "05", june: "06", july: "07", august: "08",
-      september: "09", october: "10", november: "11", december: "12"
-    };
-    const month = monthNames[m[3].toLowerCase()];
-    const day = m[2].padStart(2, '0');
-    return `${m[4]}-${month}-${day}`;
+
+  // Walk up a few levels in case the sender text is nearby
+  let cur: cheerio.Cheerio<cheerio.AnyNode> = container;
+  for (let i = 0; i < 5 && cur.length; i++) {
+    const text = normalizeWhitespace(cur.text());
+    const sender = extractSender(text);
+    if (sender) return sender;
+    cur = cur.parent();
   }
-  
+
+  // Look at siblings too
+  for (const sib of container.siblings().toArray()) {
+    const text = normalizeWhitespace($(sib).text());
+    const sender = extractSender(text);
+    if (sender) return sender;
+  }
+
   return null;
 }
 
+function getSenderFromCampaignSpan(
+  $: cheerio.CheerioAPI,
+  img: cheerio.Cheerio<cheerio.AnyNode>
+): string | null {
+  // USPS puts campaign sender text in a <span id="campaign-from-span-id">
+  const table = img.closest("table");
+  if (table.length) {
+    const span = table.find("#campaign-from-span-id").first();
+    if (span.length) return cleanText(span.text());
+  }
+
+  // As a backup, walk upwards and look for the same span
+  let cur: cheerio.Cheerio<cheerio.AnyNode> = img.parent();
+  for (let i = 0; i < 5 && cur.length; i++) {
+    const span = cur.find("#campaign-from-span-id").first();
+    if (span.length) return cleanText(span.text());
+    cur = cur.parent();
+  }
+
+  return null;
+}
+
+// Pulls a clean "From: ____" string out of text if present
 function extractSender(text: string): string | null {
-  // Look for "FROM: [sender name]" pattern - be more flexible with whitespace
-  let fromMatch = text.match(/FROM:\s*([^\n\r]+?)(?:\s+campaign|\s*$)/i);
-  if (!fromMatch) {
-    // Try with different case variations
-    fromMatch = text.match(/From:\s*([^\n\r]+?)(?:\s+campaign|\s*$)/i);
+  const fromPattern =
+    text.match(/FROM:\s*([^\n\r]+)/i) ||
+    text.match(/From:\s*([^\n\r]+)/i);
+
+  if (fromPattern) {
+    const sender = cleanText(fromPattern[1]);
+    if (isMeaningfulSender(sender)) return sender;
   }
-  if (!fromMatch) {
-    // Try "FROM" on its own line or with punctuation
-    fromMatch = text.match(/FROM[:\s]+([A-Z][A-Za-z0-9\s&,\-\.]+?)(?:\s+campaign|\s*Learn|\s*$)/i);
+
+  // Try simple company-like patterns as a fallback
+  const namePattern =
+    /([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){1,4})/g;
+  const matches = text.matchAll(namePattern);
+  for (const m of matches) {
+    const candidate = cleanText(m[1]);
+    if (isMeaningfulSender(candidate)) return candidate;
   }
-  
-  if (fromMatch) {
-    const sender = fromMatch[1].trim();
-    // Filter out obvious junk
-    if (sender && sender.length > 1 && 
-        !/Learn more|mail|package|dashboard|view|expected|today|week|icon|click|share/i.test(sender)) {
-      return cleanText(sender);
-    }
-  }
-  
-  // Try to find sender-like text patterns (capitalized words that might be company names)
-  // Look for capitalized phrases that appear near mail piece context
-  const senderPatterns = [
-    /([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)+)(?:\s+campaign)?/g, // Multiple capitalized words
-    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/g, // Company name patterns
-  ];
-  
-  for (const pattern of senderPatterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      const candidate = match[1].trim();
-      // Exclude common false positives and too short/long
-      if (candidate.length >= 3 && candidate.length < 80 &&
-          !/Expected|Today|Week|Mail|Package|Dashboard|View|Learn|Share|Click|Icon|Button/i.test(candidate) &&
-          candidate.split(/\s+/).length <= 5) { // Max 5 words
-        return cleanText(candidate);
-      }
-    }
-  }
-  
+
   return null;
 }
 
-function extractDeliveryDate($: cheerio.CheerioAPI, container: cheerio.Cheerio<cheerio.Element>, mainDate: string | null): string | null {
-  // Check if container is in "Expected Today" section
-  const parentText = container.parent().parent().text().toLowerCase();
-  if (/expected\s+today/i.test(parentText)) {
-    return mainDate; // Use the digest date for "Expected Today"
+function isMeaningfulSender(text: string): boolean {
+  if (!text || text.length < 2) return false;
+  return !/Learn|Mail|Package|Dashboard|View|Expected|Today|Week|Icon|Click/i.test(
+    text
+  );
+}
+
+function deriveFallbackSenderFromText(text: string): string | null {
+  if (!text) return null;
+  const snippet = cleanText(text.slice(0, 120));
+  if (isMeaningfulSender(snippet) && /^[A-Z]/.test(snippet)) {
+    return snippet;
   }
-  
-  // For "Expected This Week", we'd need to parse the week dates
-  // For now, return null and use mainDate as fallback
-  if (/expected\s+this\s+week/i.test(parentText)) {
-    // Could try to extract specific date from context, but mainDate is reasonable fallback
-    return null;
-  }
-  
   return null;
+}
+
+/* -------------------------- date extraction -------------------------- */
+
+// USPS includes the real delivery date in their tracking pixel query params
+function extractMainDate($: cheerio.CheerioAPI): string | null {
+  const tracking = $('img[src*="emailRead?"]').attr("src");
+  if (tracking) {
+    const match = tracking.match(/[?&]deliveryDate=([^&]+)/);
+    if (match) {
+      const d = new Date(decodeURIComponent(match[1]));
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
+  }
+
+  // The header also has day / month / year
+  const day = $("#date-number").text().trim();
+  const month = $("#month").text().trim();
+  const year = $("#year").text().trim();
+
+  if (day && month && year) {
+    const monthNum = monthFromName(month);
+    return `${year}-${monthNum}-${day.padStart(2, "0")}`;
+  }
+
+  // Loose fallback if nothing else is available
+  const body = $("body").text();
+
+  const m = body.match(/(\w+),\s+(\d{1,2})\/(\d{1,2})/);
+  if (m) {
+    const yearGuess = new Date().getFullYear();
+    return `${yearGuess}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  }
+
+  return null;
+}
+
+// Assigns section-specific dates: "Expected Today", "Expected This Week"
+function extractDeliveryDate(
+  $: cheerio.CheerioAPI,
+  img: cheerio.Cheerio<cheerio.AnyNode>,
+  mainDate: string | null
+): string | null {
+  const section = findSectionForImage($, img);
+
+  if (section === "today") return mainDate;
+
+  if (section === "week") {
+    const txt = normalizeWhitespace(
+      $("#thisweek-date-span-id").text()
+    );
+    const parsed = parseLooseDate(txt);
+    return parsed || null;
+  }
+
+  return null;
+}
+
+type Section = "today" | "week" | null;
+
+// Determines which part of the digest this image belongs to
+function findSectionForImage(
+  $: cheerio.CheerioAPI,
+  img: cheerio.Cheerio<cheerio.AnyNode>
+): Section {
+  const maxDepth = 15;
+  let cur: cheerio.Cheerio<cheerio.AnyNode> =
+    img.closest("td, div, table");
+
+  for (let i = 0; i < maxDepth && cur.length; i++) {
+    const id = cur.attr("id");
+    if (id === "expected-today") return "today";
+    if (id === "thisweek-saturation") return "week";
+    cur = cur.parent();
+  }
+
+  return null;
+}
+
+/* -------------------------- helpers -------------------------- */
+
+function monthFromName(name: string): string {
+  const map: Record<string, string> = {
+    january: "01",
+    february: "02",
+    march: "03",
+    april: "04",
+    may: "05",
+    june: "06",
+    july: "07",
+    august: "08",
+    september: "09",
+    october: "10",
+    november: "11",
+    december: "12",
+  };
+  return map[name.toLowerCase()] || "01";
+}
+
+function parseLooseDate(text: string): string | null {
+  const m = text.match(
+    /([A-Z][a-z]+)\s+(\d{1,2})(?:-\d{1,2})?,?\s+(\d{4})/
+  );
+  if (!m) return null;
+
+  const month = monthFromName(m[1]);
+  const day = m[2].padStart(2, "0");
+  return `${m[3]}-${month}-${day}`;
+}
+
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function cleanText(text: string): string {
-  return text
-    .replace(/\s+/g, " ")
-    .replace(/campaign\s*$/i, "")
-    .trim()
-    .slice(0, 120);
+  return text.replace(/\s+/g, " ").trim().slice(0, 120);
 }
