@@ -9,6 +9,11 @@ type Item = {
   deliveryDate: string | null;
   rawSenderText: string | null;
   imgHash: string | null;
+  llmSenderName: string | null;
+  llmMailType: string | null;
+  llmSummary: string | null;
+  llmIsImportant: boolean | null;
+  llmImportanceReason: string | null;
 };
 
 export default function Home() {
@@ -81,13 +86,36 @@ export default function Home() {
         <button onClick={loadQueue} className="px-3 py-2 rounded border">Refresh Queue</button>
       </div>
       <ul className="space-y-3">
-        {items.map((it) => (
-          <li key={it.id} className="border rounded p-3">
-            <div className="text-sm text-gray-600">{it.deliveryDate || '(no date found)'}</div>
-            <div className="font-medium">{it.rawSenderText?.slice(0, 140) || '(no sender parsed yet)'}</div>
-            <div className="text-xs text-gray-500 break-all">{it.imgHash}</div>
-          </li>
-        ))}
+        {items.map((it) => {
+          const senderName = it.llmSenderName || it.rawSenderText;
+          const hasLlmData = it.llmMailType || it.llmSummary;
+          
+          return (
+            <li key={it.id} className="border rounded p-3">
+              <div className="text-sm text-gray-600">{it.deliveryDate || '(no date found)'}</div>
+              <div className="font-medium">
+                {senderName ? senderName.slice(0, 140) : '(no sender parsed yet)'}
+              </div>
+              {it.llmMailType && (
+                <div className="text-sm text-blue-600 mt-1">{it.llmMailType}</div>
+              )}
+              {it.llmSummary && (
+                <div className="text-sm text-gray-700 mt-1">{it.llmSummary}</div>
+              )}
+              {it.llmIsImportant !== null && (
+                <div className={`text-xs mt-1 ${it.llmIsImportant ? 'text-red-600 font-semibold' : 'text-gray-500'}`}>
+                  {it.llmIsImportant ? 'Important' : 'Not important'}
+                  {it.llmImportanceReason && (
+                    <span className="ml-2 text-gray-600">- {it.llmImportanceReason}</span>
+                  )}
+                </div>
+              )}
+              {!hasLlmData && (
+                <div className="text-xs text-gray-400 mt-1">No LLM analysis yet</div>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </main>
   );

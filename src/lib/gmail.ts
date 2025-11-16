@@ -3,9 +3,9 @@ import { google, gmail_v1 } from "googleapis";
 type GmailClient = gmail_v1.Gmail;
 
 export function getGmailClient(accessToken: string): GmailClient {
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({ access_token: accessToken });
-  return google.gmail({ version: "v1", auth: oauth2Client });
+  const oauth2 = new google.auth.OAuth2();
+  oauth2.setCredentials({ access_token: accessToken });
+  return google.gmail({ version: "v1", auth: oauth2 });
 }
 
 export async function listDigestMessages(
@@ -25,23 +25,21 @@ export async function getMessageHtml(
   gmail: GmailClient,
   id: string
 ): Promise<string | null> {
-  const full = await gmail.users.messages.get({ userId: "me", id });
-  const payload = full.data.payload;
-
+  const msg = await gmail.users.messages.get({ userId: "me", id });
+  const payload = msg.data.payload;
   if (!payload) return null;
 
-  const html =
+  return (
     extractHtmlFromPayload(payload) ||
-    extractHtmlFromParts(payload.parts ?? []);
-
-  return html;
+    extractHtmlFromParts(payload.parts ?? [])
+  );
 }
 
 function extractHtmlFromPayload(
-  payload: gmail_v1.Schema$MessagePart
+  part: gmail_v1.Schema$MessagePart
 ): string | null {
-  if (payload.mimeType === "text/html" && payload.body?.data) {
-    return decodeB64(payload.body.data);
+  if (part.mimeType === "text/html" && part.body?.data) {
+    return decodeText(part.body.data);
   }
   return null;
 }
@@ -50,59 +48,66 @@ function extractHtmlFromParts(
   parts: gmail_v1.Schema$MessagePart[]
 ): string | null {
   for (const part of parts) {
-    const directHtml = extractHtmlFromPayload(part);
-    if (directHtml) return directHtml;
+    const direct = extractHtmlFromPayload(part);
+    if (direct) return direct;
 
     if (part.parts?.length) {
-      const nestedHtml = extractHtmlFromParts(part.parts);
-      if (nestedHtml) return nestedHtml;
+      const nested = extractHtmlFromParts(part.parts);
+      if (nested) return nested;
     }
   }
   return null;
 }
 
-function decodeB64(data: string): string {
-  const normalized = data.replace(/-/g, "+").replace(/_/g, "/");
+function decodeText(b64: string): string {
+  const normalized = b64.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(normalized, "base64").toString("utf8");
 }
 
+function decodeToBuffer(b64: string): Buffer {
+  const normalized = b64.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64");
+}
+
 /**
- * Extract an embedded image from a Gmail message by its Content-ID (cid: URL)
- * Returns the image as a Buffer, or null if not found
+ * Extract an inline image by Content-ID.
+ * Returns a Buffer or null if the image is not found.
  */
 export async function getImageByCid(
   gmail: GmailClient,
   messageId: string,
   cid: string
 ): Promise<Buffer | null> {
-  // Remove "cid:" prefix if present and clean up
   const contentId = cid.replace(/^cid:/i, "").replace(/[<>]/g, "").trim();
-  
   if (!contentId) {
-    console.log(`      ⚠️  Empty Content-ID after parsing: ${cid}`);
+    console.log(`Invalid or empty Content-ID: ${cid}`);
     return null;
   }
-  
-  const full = await gmail.users.messages.get({ 
-    userId: "me", 
+
+  const msg = await gmail.users.messages.get({
+    userId: "me",
     id: messageId,
-    format: "full" // Need full message to get attachments
+    format: "full",
   });
-  
-  const payload = full.data.payload;
+
+  const payload = msg.data.payload;
   if (!payload) {
-    console.log(`      ⚠️  No payload in message ${messageId}`);
+    console.log(`Message ${messageId} has no payload`);
     return null;
   }
-  
-  // First try to find inline data (enable debug for first few calls)
-  const enableDebug = !process.env.DISABLE_DEBUG_LOGGING;
-  const inlineResult = await findAttachmentByCid(gmail, messageId, payload, contentId, 0, enableDebug);
-  if (inlineResult) return inlineResult;
-  
-  // If not found, log debug info
-  console.log(`      ⚠️  Could not find image with Content-ID: ${contentId} (from cid: ${cid})`);
-  return null;
+
+  const debug = !process.env.DISABLE_DEBUG_LOGGING;
+
+  return (
+    (await findAttachmentByCid(
+      gmail,
+      messageId,
+      payload,
+      contentId,
+      0,
+      debug
+    )) || null
+  );
 }
 
 async function findAttachmentByCid(
@@ -110,78 +115,74 @@ async function findAttachmentByCid(
   messageId: string,
   part: gmail_v1.Schema$MessagePart,
   targetCid: string,
-  depth: number = 0,
-  debug: boolean = false
+  depth: number,
+  debug: boolean
 ): Promise<Buffer | null> {
-  // Limit recursion depth for safety
   if (depth > 10) return null;
-  
-  // Check if this part has the matching Content-ID header
-  const headers = part.headers || [];
-  const contentIdHeader = headers.find(
-    h => h.name?.toLowerCase() === "content-id"
+
+  const headers = part.headers ?? [];
+  const cidHeader = headers.find(
+    (h) => h.name?.toLowerCase() === "content-id"
   );
-  
-  // Debug: log all Content-IDs found (only for first few calls to avoid spam)
-  if (debug && contentIdHeader?.value && depth === 0) {
-    const partCid = contentIdHeader.value.replace(/[<>]/g, "").trim();
-    console.log(`      🔍 Found Content-ID in message: ${partCid} (looking for: ${targetCid})`);
-  }
-  
-  if (contentIdHeader?.value) {
-    const partCid = contentIdHeader.value.replace(/[<>]/g, "").trim();
-    const targetCidClean = targetCid.trim();
-    
-    // Try exact match first
-    if (partCid === targetCidClean || partCid === `<${targetCidClean}>` || targetCidClean === `<${partCid}>`) {
-      // Found the matching part!
-      
-      // Check if data is inline (small attachment)
+
+  if (cidHeader?.value) {
+    const partCid = cidHeader.value.replace(/[<>]/g, "").trim();
+    const target = targetCid.trim();
+
+    if (debug && depth === 0) {
+      console.log(`Found Content-ID header: ${partCid}, looking for ${target}`);
+    }
+
+    const matches =
+      partCid === target ||
+      partCid === `<${target}>` ||
+      target === `<${partCid}>` ||
+      partCid.includes(target) ||
+      target.includes(partCid);
+
+    if (matches) {
       if (part.body?.data) {
-        const normalized = part.body.data.replace(/-/g, "+").replace(/_/g, "/");
-        return Buffer.from(normalized, "base64");
+        return decodeToBuffer(part.body.data);
       }
-      
-      // If body.attachmentId exists, fetch via attachments.get API
+
       if (part.body?.attachmentId) {
         try {
           const attachment = await gmail.users.messages.attachments.get({
             userId: "me",
-            messageId: messageId,
-            id: part.body.attachmentId
+            messageId,
+            id: part.body.attachmentId,
           });
-          
+
           if (attachment.data?.data) {
-            const normalized = attachment.data.data.replace(/-/g, "+").replace(/_/g, "/");
-            return Buffer.from(normalized, "base64");
+            return decodeToBuffer(attachment.data.data);
           }
-        } catch (error) {
-          console.log(`      ⚠️  Failed to fetch attachment ${part.body.attachmentId}: ${error}`);
+        } catch (err) {
+          console.log(
+            `Failed to fetch attachment ${part.body.attachmentId}:`,
+            err
+          );
         }
       }
-      
-      // If we matched but have no data, log it
-      if (!part.body?.data && !part.body?.attachmentId) {
-        console.log(`      ⚠️  Matched Content-ID but no image data found (mimeType: ${part.mimeType})`);
-      }
-    }
-    
-    // Also try partial match (in case of encoding differences)
-    if (partCid.includes(targetCidClean) || targetCidClean.includes(partCid)) {
-      if (part.body?.data) {
-        const normalized = part.body.data.replace(/-/g, "+").replace(/_/g, "/");
-        return Buffer.from(normalized, "base64");
-      }
+
+      console.log(
+        `Matched Content-ID but no image data (mimeType=${part.mimeType})`
+      );
     }
   }
-  
-  // Search in nested parts
-  if (part.parts) {
-    for (const nestedPart of part.parts) {
-      const found = await findAttachmentByCid(gmail, messageId, nestedPart, targetCid, depth + 1, debug);
+
+  if (part.parts?.length) {
+    for (const nested of part.parts) {
+      const found = await findAttachmentByCid(
+        gmail,
+        messageId,
+        nested,
+        targetCid,
+        depth + 1,
+        debug
+      );
       if (found) return found;
     }
   }
-  
+
   return null;
 }
