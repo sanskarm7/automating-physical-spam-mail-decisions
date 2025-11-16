@@ -6,6 +6,7 @@ import { db } from "@/db/client";
 import { messages } from "@/db/schema";
 import { parseInformedDeliveryTiles } from "@/lib/parser";
 import { createHash } from "crypto";
+import { eq, and } from "drizzle-orm";
 
 export async function GET() {
   const session = await auth();
@@ -16,7 +17,7 @@ export async function GET() {
    return NextResponse.json({ error: "no access token on session. configure NextAuth token callbacks." }, { status: 400 });
  }
  const gmail = getGmailClient(token);
- const q = process.env.GMAIL_QUERY || 'from:wlrsanskar@gmail.com subject:"mail_test" newer_than:60d';
+ const q = process.env.GMAIL_QUERY || 'from:USPSInformeddelivery@email.informeddelivery.usps.com subject:"Daily Digest" newer_than:60d';
  
  console.log('Searching Gmail with query:', q);
  const list = await listDigestMessages(gmail, q);
@@ -33,28 +34,51 @@ export async function GET() {
    }
    console.log(`Downloaded HTML (${html.length} chars)`);
    
-   const tiles = parseInformedDeliveryTiles(html);
-   console.log(`  🖼️  Found ${tiles.length} mail piece(s)`);
+  const tiles = parseInformedDeliveryTiles(html);
+  console.log(`  🖼️  Found ${tiles.length} mail piece(s)`);
+  
+  // Debug: Save first email's HTML to inspect structure
+  if (list.indexOf(m) === 0) {
+    const fs = await import('fs/promises');
+    await fs.writeFile('./debug-email.html', html);
+    console.log('  📝 Saved email HTML to debug-email.html for inspection');
+  }
    
-   for (const t of tiles) {
-     const img = t.imageUrl || "";
-     const date = t.deliveryDate || "";
-     const hash = createHash("sha256").update(img + "|" + date).digest("hex");
-     console.log(`    • Sender: ${t.senderGuess?.slice(0, 40)}, Date: ${date}, Hash: ${hash.slice(0, 8)}...`);
-     try {
-       db.insert(messages).values({
-         userId: (session as any).userId,
-         gmailMsgId: id,
-         deliveryDate: date,
-         rawSenderText: t.senderGuess ?? null,
-         imgHash: hash
-       }).run();
-       inserted++;
-       console.log(`Inserted`);
-     } catch {
-       console.log(`Skipped (duplicate)`);
-     }
-   }
+  for (const t of tiles) {
+    const img = t.imageUrl || "";
+    const date = t.deliveryDate || "";
+    const hash = createHash("sha256").update(img + "|" + date).digest("hex");
+    console.log(`    • Sender: ${t.senderGuess?.slice(0, 40) || '(none)'}, Date: ${date}, Hash: ${hash.slice(0, 8)}...`);
+    
+    // Check if this mail piece (by imgHash) already exists
+    const existing = db.select()
+      .from(messages)
+      .where(and(
+        eq(messages.imgHash, hash),
+        eq(messages.userId, (session as any).userId)
+      ))
+      .limit(1)
+      .all();
+    
+    if (existing.length > 0) {
+      console.log(`      ⏭️  Skipped (duplicate mail piece)`);
+      continue;
+    }
+    
+    try {
+      db.insert(messages).values({
+        userId: (session as any).userId,
+        gmailMsgId: id + "_" + hash.slice(0, 8), // Make unique by appending hash prefix
+        deliveryDate: date,
+        rawSenderText: t.senderGuess ?? null,
+        imgHash: hash
+      }).run();
+      inserted++;
+      console.log(`      ✅ Inserted`);
+    } catch (error: any) {
+      console.log(`      ❌ Error: ${error.message || error}`);
+    }
+  }
  }
 
  console.log(`\n✨ Total inserted: ${inserted}`);
